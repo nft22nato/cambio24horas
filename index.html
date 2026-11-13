@@ -171,7 +171,7 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
   </section>
 
   <aside>
-    <h2>Moedas · em reais</h2>
+    <h2>Moedas ao vivo</h2>
     <div class="list" id="list" role="group" aria-label="Escolher moeda"></div>
   </aside>
 </main>
@@ -184,6 +184,7 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
   const POLL_MS = 30000, DAY_MS = 86400000, STALE_RELOAD_MS = 15 * 60000;
   const PAIRS = [
     { k: "USD-BRL", c: "USDBRL", label: "Dólar americano", short: "Dólar", sym: "$", base: 5.65 },
+    { k: "USD-BOB", c: "USDBOBP", label: "Dólar paralelo · Bolívia", short: "Paralelo BOL", sym: "Bs", base: 11.95, quote: "Bs", src: "bo" },
     { k: "EUR-BRL", c: "EURBRL", label: "Euro", short: "Euro", sym: "€", base: 6.24 },
     { k: "GBP-BRL", c: "GBPBRL", label: "Libra esterlina", short: "Libra", sym: "£", base: 7.47 },
     { k: "BTC-BRL", c: "BTCBRL", label: "Bitcoin", short: "Bitcoin", sym: "₿", base: 404800 },
@@ -244,7 +245,7 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
 
   async function pollLast() {
     try {
-      const j = await getJSON(API + "/last/" + PAIRS.map(p => p.k).join(","));
+      const j = await getJSON(API + "/last/" + PAIRS.filter(p => !p.src).map(p => p.k).join(","));
       if (sim) stopSim();
       for (const c in j) {
         if (!byCode[c]) continue;
@@ -252,6 +253,7 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
         quotes[c] = { bid: +q.bid, ask: +q.ask, high: +q.high, low: +q.low, varBid: +q.varBid, pct: +q.pctChange, t };
         merge(c, [{ t, v: +q.bid }]);
       }
+      try { await pollBolivia(); } catch (e) {}
       persist(); lastOk = Date.now(); failCount = 0; setStatus("live");
       return true;
     } catch (e) {
@@ -266,8 +268,33 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
     clearTimeout(pollTimer);
     pollTimer = setTimeout(async () => { await pollLast(); refreshAll(); schedulePoll(); }, wait);
   }
+  // ---------- dólar paralelo da Bolívia: paralelo.bo (mediana de várias P2P), reserva CriptoYa / Binance P2P ----------
+  let boHist = null, boHistAt = 0;
+  async function boHistory() {
+    if (boHist && Date.now() - boHistAt < 3600000) return boHist;
+    const j = await getJSON("https://paralelo.bo/api/v1/historical.json");
+    boHist = (j.points || []).map(p => ({ t: Date.parse(p.t), v: +p.v })).filter(p => isFinite(p.t) && p.v > 0).sort((a, b) => a.t - b.t);
+    boHistAt = Date.now(); return boHist;
+  }
+  async function pollBolivia() {
+    let buy, sell, mid;
+    try { const j = await getJSON("https://paralelo.bo/api/v1/rate"); buy = +j.buy; sell = +j.sell; mid = +j.median; }
+    catch (e) { const j = await getJSON("https://criptoya.com/api/binancep2p/USDT/BOB/1"); buy = +j.bid; sell = +j.ask; mid = (buy + sell) / 2; }
+    if (!(mid > 0)) throw new Error("sem preço");
+    const c = "USDBOBP", t = Date.now();
+    merge(c, [{ t, v: mid }]);
+    const day0 = new Date(); day0.setHours(0, 0, 0, 0);
+    let open = null;
+    try { const prev = (await boHistory()).filter(p => p.t < day0.getTime()); if (prev.length) open = prev[prev.length - 1].v; } catch (e) {}
+    const today = series[c].filter(p => p.t >= day0.getTime()).map(p => p.v);
+    if (open == null) open = today.length ? today[0] : mid;
+    quotes[c] = { bid: mid, ask: sell, buy, sell, open, high: Math.max(mid, ...today), low: Math.min(mid, ...today),
+      varBid: mid - open, pct: (mid - open) / open * 100, t };
+  }
+
   async function seed(c) {
     if (sim || seeded[c]) return;
+    if (byCode[c].src) { seeded[c] = true; return; }
     try {
       const arr = await getJSON(API + "/" + byCode[c].k + "/100");
       merge(c, arr.map(q => ({ t: +q.timestamp * 1000, v: +q.bid })));
@@ -281,6 +308,10 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
   async function loadMonth(c) {
     if (monthly[c] && Date.now() - monthly[c].at < 3600000) return;
     if (sim) { monthly[c] = { at: Date.now(), d: walk(byCode[c].base, 30, DAY_MS, 0.012) }; return; }
+    if (byCode[c].src) {
+      try { monthly[c] = { at: Date.now(), d: (await boHistory()).slice(-30) }; } catch (e) {}
+      return;
+    }
     try {
       const arr = await getJSON(API + "/daily/" + byCode[c].k + "/30");
       monthly[c] = { at: Date.now(), d: arr.map(q => ({ t: +q.timestamp * 1000, v: +q.bid })).sort((a, b) => a.t - b.t) };
@@ -325,7 +356,7 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
       ? "<b>Demonstração:</b> sem acesso à internet, os valores são inventados. O painel continua tentando e passa para as cotações reais assim que conectar."
       : s === "retry"
         ? "<b>Internet instável.</b> Mostrando o último valor recebido e o gráfico salvo. O painel volta sozinho quando a conexão voltar."
-        : "Cotações de economia.awesomeapi.com.br, atualizadas a cada 30 segundos. O gráfico fica salvo no aparelho e continua de onde parou se a TV desligar."
+        : "Cotações de economia.awesomeapi.com.br e, para o dólar paralelo da Bolívia (em bolivianos), paralelo.bo, atualizadas a cada 30 segundos. O gráfico fica salvo no aparelho e continua de onde parou se a TV desligar."
           + "<br>Controle: <b>◀ ▶</b> troca a moeda · <b>▲ ▼</b> troca o período · <b>OK</b> liga ou desliga o alternar sozinho.";
   }
 
@@ -357,7 +388,7 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
       const changed = lastPriceStr && lastPriceStr[i] !== ch && /\d/.test(ch);
       return `<span class="d${changed && dir ? " " + dir : ""}">${ch}</span>`;
     }).join("");
-    if (s !== lastPriceStr) $("price").innerHTML = `<span class="cur">R$</span>${html}`;
+    if (s !== lastPriceStr) $("price").innerHTML = `<span class="cur">${byCode[sel].quote || "R$"}</span>${html}`;
     lastPriceStr = s; lastPriceVal = v;
   }
 
@@ -370,7 +401,7 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
       setPrice(q.bid);
       $("pill").textContent = (up ? "▲ +" : "▼ ") + fmt(q.varBid, dec(q.bid)) + "  " + (up ? "+" : "") + fmt(q.pct, 2) + "%";
       $("since").textContent = "variação no dia · " + new Date(q.t).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
-      $("f-bid").textContent = fmt(q.bid); $("f-ask").textContent = fmt(q.ask); $("f-open").textContent = fmt(open);
+      $("f-bid").textContent = fmt(q.buy ?? q.bid); $("f-ask").textContent = fmt(q.sell ?? q.ask); $("f-open").textContent = fmt(open);
       $("f-high").textContent = fmt(q.high); $("f-low").textContent = fmt(q.low);
     }
     PAIRS.forEach(o => {
@@ -398,7 +429,7 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
   function buildTrack() {
     const items = PAIRS.filter(p => quotes[p.c]).map(p => {
       const q = quotes[p.c], cls = q.pct >= 0 ? "up" : "down";
-      return `<span><b>${p.short.toUpperCase()}</b>R$ ${fmt(q.bid)} <em class="${cls}" style="font-style:normal">${q.pct >= 0 ? "▲" : "▼"} ${fmt(Math.abs(q.pct), 2)}%</em></span>`;
+      return `<span><b>${p.short.toUpperCase()}</b>${p.quote || "R$"} ${fmt(q.bid)} <em class="${cls}" style="font-style:normal">${q.pct >= 0 ? "▲" : "▼"} ${fmt(Math.abs(q.pct), 2)}%</em></span>`;
     }).join("");
     const html = items + items;
     if ($("track").innerHTML !== html) $("track").innerHTML = html;
@@ -424,7 +455,7 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
     const data = range === "month" ? monthly[sel] && monthly[sel].d : series[sel];
     if (!data || data.length < 2) {
       ctx.fillStyle = css("--muted"); ctx.font = "14px 'JetBrains Mono', monospace"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillText("Carregando gráfico…", W / 2, H / 2); return;
+      ctx.fillText(data && data.length === 1 ? "Montando o gráfico ao vivo… novo ponto a cada 30 segundos" : "Carregando gráfico…", W / 2, H / 2); return;
     }
     const q = quotes[sel];
     let lo = Infinity, hi = -Infinity; data.forEach(d => { lo = Math.min(lo, d.v); hi = Math.max(hi, d.v); });
@@ -486,7 +517,7 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
     let iHi = 0, iLo = 0; data.forEach((d, i) => { if (d.v > data[iHi].v) iHi = i; if (d.v < data[iLo].v) iLo = i; });
     ctx.font = "600 11px 'JetBrains Mono', monospace";
     [[iHi, "máx", -1], [iLo, "mín", 1]].forEach(([i, lbl, dir]) => {
-      if (i === data.length - 1) return;
+      if (i === data.length - 1 || hi === lo) return;
       const [px, py] = pts[i]; ctx.fillStyle = css("--fg");
       ctx.beginPath(); ctx.arc(px, py, 3, 0, 7); ctx.fill();
       ctx.textAlign = px > padL + cw - 80 ? "right" : px < padL + 80 ? "left" : "center";
