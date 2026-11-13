@@ -276,6 +276,12 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
     boHist = (j.points || []).map(p => ({ t: Date.parse(p.t), v: +p.v })).filter(p => isFinite(p.t) && p.v > 0).sort((a, b) => a.t - b.t);
     boHistAt = Date.now(); return boHist;
   }
+  // gráfico curto do paralelo: últimos 7 fechamentos diários + pontos ao vivo coletados depois deles
+  function boRecent(c) {
+    const h = (boHist || []).slice(-7), live = series[c] || [];
+    const lastT = h.length ? h[h.length - 1].t : 0;
+    return h.concat(live.filter(p => p.t > lastT));
+  }
   async function pollBolivia() {
     let buy, sell, mid;
     try { const j = await getJSON("https://paralelo.bo/api/v1/rate"); buy = +j.buy; sell = +j.sell; mid = +j.median; }
@@ -376,6 +382,7 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
     document.querySelectorAll(".item").forEach(b => b.setAttribute("aria-pressed", b.dataset.c === c));
     const b = document.querySelector(`.item[data-c="${c}"]`); b && b.scrollIntoView({ block: "nearest" });
     lastPriceStr = ""; view.lo = view.hi = null;
+    document.querySelector('[data-range="day"]').textContent = byCode[c].src ? "7 dias" : "24 horas";
     seed(c).then(refreshAll);
     if (range === "month") loadMonth(c).then(refreshAll);
     refreshAll();
@@ -414,7 +421,7 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
   }
 
   function spark(c) {
-    const cv = $("sp-" + c), s = series[c], q = quotes[c]; if (!cv || !s || s.length < 2) return;
+    const cv = $("sp-" + c), s = byCode[c].src && !sim ? boRecent(c) : series[c], q = quotes[c]; if (!cv || !s || s.length < 2) return;
     const g = cv.getContext("2d"), W = cv.width, H = cv.height; g.clearRect(0, 0, W, H);
     let lo = Infinity, hi = -Infinity; s.forEach(p => { lo = Math.min(lo, p.v); hi = Math.max(hi, p.v); });
     const sp = hi - lo || 1, t0 = s[0].t, t1 = s[s.length - 1].t || t0 + 1;
@@ -438,13 +445,18 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
   // ---------- gráfico principal ----------
   const cv = $("chart"), ctx = cv.getContext("2d");
   const view = { lo: null, hi: null };
+  // curva suave que passa exatamente por cada cotação, sem inventar picos (spline monótona)
   function smoothPath(pts) {
-    ctx.moveTo(pts[0][0], pts[0][1]);
-    for (let i = 1; i < pts.length - 1; i++) {
-      const mx = (pts[i][0] + pts[i + 1][0]) / 2, my = (pts[i][1] + pts[i + 1][1]) / 2;
-      ctx.quadraticCurveTo(pts[i][0], pts[i][1], mx, my);
+    const n = pts.length; ctx.moveTo(pts[0][0], pts[0][1]);
+    if (n < 3) { for (let i = 1; i < n; i++) ctx.lineTo(pts[i][0], pts[i][1]); return; }
+    const m = [], t = [];
+    for (let i = 0; i < n - 1; i++) { const dx = pts[i + 1][0] - pts[i][0]; m.push(dx ? (pts[i + 1][1] - pts[i][1]) / dx : 0); }
+    t[0] = m[0]; t[n - 1] = m[n - 2];
+    for (let i = 1; i < n - 1; i++) t[i] = m[i - 1] * m[i] <= 0 ? 0 : (m[i - 1] + m[i]) / 2;
+    for (let i = 0; i < n - 1; i++) {
+      const [x0, y0] = pts[i], [x1, y1] = pts[i + 1], d = (x1 - x0) / 3;
+      ctx.bezierCurveTo(x0 + d, y0 + t[i] * d, x1 - d, y1 - t[i + 1] * d, x1, y1);
     }
-    const l = pts[pts.length - 1]; ctx.lineTo(l[0], l[1]);
   }
   function draw() {
     const r = cv.getBoundingClientRect(), dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -452,7 +464,7 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
     if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const W = r.width, H = r.height; ctx.clearRect(0, 0, W, H);
-    const data = range === "month" ? monthly[sel] && monthly[sel].d : series[sel];
+    const data = range === "month" ? monthly[sel] && monthly[sel].d : byCode[sel].src && !sim ? boRecent(sel) : series[sel];
     if (!data || data.length < 2) {
       ctx.fillStyle = css("--muted"); ctx.font = "14px 'JetBrains Mono', monospace"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
       ctx.fillText(data && data.length === 1 ? "Montando o gráfico ao vivo… novo ponto a cada 30 segundos" : "Carregando gráfico…", W / 2, H / 2); return;
@@ -472,20 +484,23 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
     const muted = css("--muted"), edge = css("--edge");
 
     ctx.textBaseline = "middle"; ctx.textAlign = "left";
+    const tagAt = Y(data[data.length - 1].v);
     for (let i = 0; i <= 4; i++) {
       const v = vlo + (vhi - vlo) * (i + 0.5) / 5, yy = Y(v);
+      if (Math.abs(yy - tagAt) < 18) continue;
       ctx.strokeStyle = edge; ctx.lineWidth = 1; ctx.setLineDash([2, 6]);
       ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(padL + cw, yy); ctx.stroke(); ctx.setLineDash([]);
       ctx.fillStyle = muted; ctx.fillText(fmt(v, d0), padL + cw + 10, yy);
     }
     ctx.textAlign = "center"; ctx.textBaseline = "top";
-    const steps = range === "month" ? [DAY_MS * 3, DAY_MS * 5, DAY_MS * 7] : [5, 10, 15, 30, 60, 120, 180, 240, 360].map(m => m * 60000);
+    const byDay = range === "month" || t1 - t0 > 2 * DAY_MS;
+    const steps = byDay ? [1, 2, 3, 5, 7].map(d => d * DAY_MS) : [5, 10, 15, 30, 60, 120, 180, 240, 360].map(m => m * 60000);
     const step = steps.find(s => (t1 - t0) / s <= 7) || steps[steps.length - 1];
     const tz = new Date().getTimezoneOffset() * 60000;
     for (let t = Math.ceil((t0 - tz) / step) * step + tz; t <= t1; t += step) {
       const xx = X(t); if (xx < padL + 24 || xx > padL + cw - 24) continue;
       const dt = new Date(t); ctx.fillStyle = muted;
-      ctx.fillText(range === "month" ? dt.toLocaleDateString("pt-BR", { day: "2-digit", month: "short" }).replace(".", "")
+      ctx.fillText(byDay ? dt.toLocaleDateString("pt-BR", { day: "2-digit", month: "short" }).replace(".", "")
         : dt.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }), xx, padT + ch + 10);
     }
 
