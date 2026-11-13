@@ -29,7 +29,7 @@
 }
 html, body { height: 100%; }
 body { background: var(--bg); color: var(--fg); font-family: var(--body); display: flex; flex-direction: column; overflow-x: hidden; position: relative; }
-body.down { --trend: var(--down); }
+body.trend-down { --trend: var(--down); }
 .gut { padding-left: max(20px, env(safe-area-inset-left, 0px)); padding-right: max(20px, env(safe-area-inset-right, 0px)); }
 
 /* Fundo vivo: brilho que muda de cor com a tendência + grade de pregão */
@@ -95,6 +95,20 @@ canvas#chart { position: absolute; inset: 0; width: 100%; height: 100%; }
 .fact { background: var(--surface); border: 1px solid var(--edge); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .fact span { font-size: .68rem; text-transform: uppercase; letter-spacing: .12em; color: var(--muted); }
 .fact b { font-family: var(--mono); font-weight: 500; font-size: 1rem; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.best { display: flex; flex-direction: column; gap: 8px; }
+.best-head { display: flex; gap: 6px 14px; align-items: baseline; flex-wrap: wrap; }
+.best-head b { font-family: var(--display); font-size: .95rem; font-weight: 600; }
+.best-head span { font-size: .76rem; color: var(--muted); }
+.routes { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+.route { background: var(--surface); border: 1px solid var(--edge); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.route span { font-size: .66rem; text-transform: uppercase; letter-spacing: .12em; color: var(--muted); }
+.route b { font-family: var(--display); font-weight: 600; font-size: .98rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.route strong { font-family: var(--mono); font-weight: 700; font-size: 1.15rem; font-variant-numeric: tabular-nums; }
+.route small { font-family: var(--mono); font-size: .74rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.route.top { border-color: var(--up); box-shadow: 0 0 0 1px var(--up), 0 0 22px color-mix(in srgb, var(--up) 22%, transparent); }
+.route.top span, .route.top strong { color: var(--up); }
+.route.ref strong { color: var(--muted); }
+@media (max-width: 900px) { .routes { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .note { font-size: .76rem; color: var(--muted); line-height: 1.5; }
 .note b { color: var(--fg); font-weight: 500; }
 
@@ -167,6 +181,10 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
       <div class="fact"><span>Máxima</span><b id="f-high">--</b></div>
       <div class="fact"><span>Mínima</span><b id="f-low">--</b></div>
     </div>
+    <div class="best" id="best" hidden>
+      <div class="best-head"><b>Onde trocar reais por bolivianos agora</b><span id="best-route">Buscando cotações nas casas…</span></div>
+      <div class="routes" id="routes"></div>
+    </div>
     <div class="note" id="note"></div>
   </section>
 
@@ -186,7 +204,7 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
     { k: "USD-BRL", c: "USDBRL", label: "Dólar americano", short: "Dólar", sym: "$", base: 5.65 },
     { k: "USD-BOB", c: "USDBOBP", label: "Dólar paralelo · Bolívia", short: "Paralelo BOL", sym: "Bs", base: 11.95, quote: "Bs", src: "bo" },
     { k: "EUR-BRL", c: "EURBRL", label: "Euro", short: "Euro", sym: "€", base: 6.24 },
-    { k: "GBP-BRL", c: "GBPBRL", label: "Libra esterlina", short: "Libra", sym: "£", base: 7.47 },
+    { k: "BRL-BOB", c: "BRLBOBP", label: "Real → Boliviano · paralelo", short: "Real → Bs", sym: "Bs", base: 2.11, quote: "Bs", src: "brlbob" },
     { k: "BTC-BRL", c: "BTCBRL", label: "Bitcoin", short: "Bitcoin", sym: "₿", base: 404800 },
     { k: "ETH-BRL", c: "ETHBRL", label: "Ethereum", short: "Ethereum", sym: "Ξ", base: 11380 },
     { k: "ARS-BRL", c: "ARSBRL", label: "Peso argentino", short: "Peso ARG", sym: "$", base: 0.00366 },
@@ -245,8 +263,9 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
 
   async function pollLast() {
     try {
-      const j = await getJSON(API + "/last/" + PAIRS.filter(p => !p.src).map(p => p.k).join(","));
+      const j = await getJSON(API + "/last/" + PAIRS.filter(p => !p.src).map(p => p.k).concat("BRL-BOB").join(","));
       if (sim) stopSim();
+      if (j.BRLBOB) commercialBOB = +j.BRLBOB.bid;
       for (const c in j) {
         if (!byCode[c]) continue;
         const q = j[c], t = +q.timestamp * 1000;
@@ -254,6 +273,7 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
         merge(c, [{ t, v: +q.bid }]);
       }
       try { await pollBolivia(); } catch (e) {}
+      try { await pollRoutes(); } catch (e) {}
       persist(); lastOk = Date.now(); failCount = 0; setStatus("live");
       return true;
     } catch (e) {
@@ -276,9 +296,40 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
     boHist = (j.points || []).map(p => ({ t: Date.parse(p.t), v: +p.v })).filter(p => isFinite(p.t) && p.v > 0).sort((a, b) => a.t - b.t);
     boHistAt = Date.now(); return boHist;
   }
-  // gráfico curto do paralelo: últimos 7 fechamentos diários + pontos ao vivo coletados depois deles
-  function boRecent(c) {
-    const h = (boHist || []).slice(-7), live = series[c] || [];
+  // Real → Boliviano: dólar paralelo (paralelo.bo) dividido pelo dólar comercial em reais
+  let crossHist = null, crossAt = 0, commercialBOB = null, routes = null;
+  async function crossHistory() {
+    if (crossHist && Date.now() - crossAt < 3600000) return crossHist;
+    const [bo, usd] = await Promise.all([boHistory(), getJSON(API + "/daily/USD-BRL/30")]);
+    const u = usd.map(q => ({ t: +q.timestamp * 1000, v: +q.bid })).filter(q => q.v > 0);
+    crossHist = bo.map(p => {
+      let best = null; for (const q of u) if (!best || Math.abs(q.t - p.t) < Math.abs(best.t - p.t)) best = q;
+      return best && Math.abs(best.t - p.t) < 2 * DAY_MS ? { t: p.t, v: p.v / best.v } : null;
+    }).filter(Boolean);
+    crossAt = Date.now(); return crossHist;
+  }
+
+  // Onde trocar: compra USDT com reais na casa mais barata e vende por bolivianos onde pagam mais (CriptoYa)
+  const NAMES = { binancep2p: "Binance P2P", bybitp2p: "Bybit P2P", bitgetp2p: "Bitget P2P", mexcp2p: "MEXC P2P", okexp2p: "OKX P2P",
+    kucoinp2p: "KuCoin P2P", bingxp2p: "BingX P2P", vitawallet: "Vita Wallet", saldo: "Saldo", binance: "Binance", bybit: "Bybit",
+    foxbit: "Foxbit", ripio: "Ripio", ripioexchange: "Ripio Exchange", belo: "Belo", brasilbitcoin: "Brasil Bitcoin", cryptomktpro: "CryptoMKT", peanut: "Peanut" };
+  const nm = k => NAMES[k] || k.charAt(0).toUpperCase() + k.slice(1);
+  async function pollRoutes() {
+    const [brl, bob] = await Promise.all([getJSON("https://criptoya.com/api/usdt/brl/1"), getJSON("https://criptoya.com/api/usdt/bob/1")]);
+    const fresh = o => o && o.time && Date.now() - o.time * 1000 < 30 * 60000;
+    // descarta ofertas antigas e anúncios com preço invertido (compra acima da venda), que costumam ser enganosos
+    const buys = Object.entries(brl).filter(([k, o]) => fresh(o) && o.totalAsk > 0).map(([k, o]) => ({ k, px: +o.totalAsk })).sort((a, b) => a.px - b.px);
+    const sells = Object.entries(bob).filter(([k, o]) => fresh(o) && o.totalBid > 0 && o.totalBid <= o.totalAsk * 1.02)
+      .map(([k, o]) => ({ k, px: +o.totalBid })).sort((a, b) => b.px - a.px);
+    if (!buys.length || !sells.length) return;
+    const buy = buys[0];
+    routes = { at: Date.now(), buy, list: sells.slice(0, 4).map(s => ({ where: nm(s.k), sell: s.px, rate: s.px / buy.px })) };
+  }
+
+  // gráfico curto: últimos 7 fechamentos diários + pontos ao vivo coletados depois deles
+  function recent(c) {
+    if (sim || !byCode[c].src) return series[c];
+    const h = ((c === "USDBOBP" ? boHist : crossHist) || []).slice(-7), live = series[c] || [];
     const lastT = h.length ? h[h.length - 1].t : 0;
     return h.concat(live.filter(p => p.t > lastT));
   }
@@ -296,6 +347,17 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
     if (open == null) open = today.length ? today[0] : mid;
     quotes[c] = { bid: mid, ask: sell, buy, sell, open, high: Math.max(mid, ...today), low: Math.min(mid, ...today),
       varBid: mid - open, pct: (mid - open) / open * 100, t };
+
+    if (quotes.USDBRL && quotes.USDBRL.bid > 0) {
+      const c2 = "BRLBOBP", v2 = mid / quotes.USDBRL.bid;
+      merge(c2, [{ t, v: v2 }]);
+      let open2 = null;
+      try { const prev = (await crossHistory()).filter(p => p.t < day0.getTime()); if (prev.length) open2 = prev[prev.length - 1].v; } catch (e) {}
+      const today2 = series[c2].filter(p => p.t >= day0.getTime()).map(p => p.v);
+      if (open2 == null) open2 = today2.length ? today2[0] : v2;
+      quotes[c2] = { bid: v2, ask: v2, open: open2, high: Math.max(v2, ...today2), low: Math.min(v2, ...today2),
+        varBid: v2 - open2, pct: (v2 - open2) / open2 * 100, t };
+    }
   }
 
   async function seed(c) {
@@ -315,7 +377,7 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
     if (monthly[c] && Date.now() - monthly[c].at < 3600000) return;
     if (sim) { monthly[c] = { at: Date.now(), d: walk(byCode[c].base, 30, DAY_MS, 0.012) }; return; }
     if (byCode[c].src) {
-      try { monthly[c] = { at: Date.now(), d: (await boHistory()).slice(-30) }; } catch (e) {}
+      try { monthly[c] = { at: Date.now(), d: (await (c === "USDBOBP" ? boHistory() : crossHistory())).slice(-30) }; } catch (e) {}
       return;
     }
     try {
@@ -362,7 +424,7 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
       ? "<b>Demonstração:</b> sem acesso à internet, os valores são inventados. O painel continua tentando e passa para as cotações reais assim que conectar."
       : s === "retry"
         ? "<b>Internet instável.</b> Mostrando o último valor recebido e o gráfico salvo. O painel volta sozinho quando a conexão voltar."
-        : "Cotações de economia.awesomeapi.com.br e, para o dólar paralelo da Bolívia (em bolivianos), paralelo.bo, atualizadas a cada 30 segundos. O gráfico fica salvo no aparelho e continua de onde parou se a TV desligar."
+        : "Cotações de economia.awesomeapi.com.br, paralelo.bo (dólar paralelo da Bolívia, em bolivianos) e criptoya.com (preços do USDT por casa), atualizadas a cada 30 segundos. O gráfico fica salvo no aparelho e continua de onde parou se a TV desligar."
           + "<br>Controle: <b>◀ ▶</b> troca a moeda · <b>▲ ▼</b> troca o período · <b>OK</b> liga ou desliga o alternar sozinho.";
   }
 
@@ -404,13 +466,14 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
     $("pair").textContent = p.k.replace("-", "/"); $("name").textContent = p.label; $("sym").textContent = p.sym;
     if (q) {
       const open = q.open ?? (q.bid - q.varBid), up = q.pct >= 0;
-      document.body.classList.toggle("down", !up);
+      document.body.classList.toggle("trend-down", !up);
       setPrice(q.bid);
       $("pill").textContent = (up ? "▲ +" : "▼ ") + fmt(q.varBid, dec(q.bid)) + "  " + (up ? "+" : "") + fmt(q.pct, 2) + "%";
       $("since").textContent = "variação no dia · " + new Date(q.t).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
       $("f-bid").textContent = fmt(q.buy ?? q.bid); $("f-ask").textContent = fmt(q.sell ?? q.ask); $("f-open").textContent = fmt(open);
       $("f-high").textContent = fmt(q.high); $("f-low").textContent = fmt(q.low);
     }
+    renderBest();
     PAIRS.forEach(o => {
       const oq = quotes[o.c]; if (!oq) return;
       $("lp-" + o.c).textContent = fmt(oq.bid);
@@ -420,8 +483,24 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
     buildTrack();
   }
 
+  function renderBest() {
+    const on = sel === "BRLBOBP";
+    $("best").hidden = !on; document.querySelector(".facts").hidden = on;
+    if (!on) return;
+    if (sim) { $("best-route").textContent = "Disponível quando o painel estiver conectado à internet."; $("routes").innerHTML = ""; return; }
+    if (!routes) return;
+    const cards = routes.list.map((r, i) => `
+      <div class="route${i === 0 ? " top" : ""}"><span>${i === 0 ? "Melhor agora" : (i + 1) + "º lugar"}</span><b>${r.where}</b>
+        <strong>Bs ${fmt(r.rate, 4)}</strong><small>R$ 1.000 → Bs ${fmt(r.rate * 1000, 2)}</small></div>`);
+    if (commercialBOB) cards.push(`
+      <div class="route ref"><span>Referência</span><b>Câmbio comercial</b>
+        <strong>Bs ${fmt(commercialBOB, 4)}</strong><small>R$ 1.000 → Bs ${fmt(commercialBOB * 1000, 2)}</small></div>`);
+    $("routes").innerHTML = cards.slice(0, 5).join("");
+    $("best-route").textContent = `Comprando USDT com reais na ${nm(routes.buy.k)} (R$ ${fmt(routes.buy.px, 4)}) e vendendo por bolivianos no lugar indicado. Valores por R$ 1, com taxas das plataformas; limites e anúncios mudam a todo momento.`;
+  }
+
   function spark(c) {
-    const cv = $("sp-" + c), s = byCode[c].src && !sim ? boRecent(c) : series[c], q = quotes[c]; if (!cv || !s || s.length < 2) return;
+    const cv = $("sp-" + c), s = recent(c), q = quotes[c]; if (!cv || !s || s.length < 2) return;
     const g = cv.getContext("2d"), W = cv.width, H = cv.height; g.clearRect(0, 0, W, H);
     let lo = Infinity, hi = -Infinity; s.forEach(p => { lo = Math.min(lo, p.v); hi = Math.max(hi, p.v); });
     const sp = hi - lo || 1, t0 = s[0].t, t1 = s[s.length - 1].t || t0 + 1;
@@ -464,7 +543,7 @@ aside h2 { margin: 0 0 2px; font-family: var(--display); font-size: .78rem; font
     if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const W = r.width, H = r.height; ctx.clearRect(0, 0, W, H);
-    const data = range === "month" ? monthly[sel] && monthly[sel].d : byCode[sel].src && !sim ? boRecent(sel) : series[sel];
+    const data = range === "month" ? monthly[sel] && monthly[sel].d : recent(sel);
     if (!data || data.length < 2) {
       ctx.fillStyle = css("--muted"); ctx.font = "14px 'JetBrains Mono', monospace"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
       ctx.fillText(data && data.length === 1 ? "Montando o gráfico ao vivo… novo ponto a cada 30 segundos" : "Carregando gráfico…", W / 2, H / 2); return;
